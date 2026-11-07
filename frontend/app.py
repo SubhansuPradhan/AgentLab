@@ -49,7 +49,15 @@ VERDICT_LABEL = {
     "revise": "Not approved, revision required",
 }
 
-st.set_page_config(page_title="AgentLab", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="AgentLab", page_icon="🧪", layout="wide", initial_sidebar_state="collapsed")
+st.markdown(
+    """<style>
+    [data-testid="stSidebar"], [data-testid="stSidebarNav"],
+    [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] {display: none !important;}
+    .block-container {padding-top: 2.5rem;}
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 
 # ----------------------------------------------------------------------
@@ -116,55 +124,58 @@ def run_with_progress(df, target, name, run_id, critic_on, max_rev, n_trials):
         status.update(label="Analysis complete", state="complete", expanded=False)
     return state
 
-
+def render_header():
+    """Logo and name in the left column, description in the right column, above the tabs."""
+    try:
+        left, right = st.columns([1, 3], vertical_alignment="center")
+    except TypeError:                      # older Streamlit without vertical_alignment
+        left, right = st.columns([1, 3])
+    with left:
+        a, b, c = st.columns([1, 2, 1])
+        with b:
+            st.image(LOGO_URL, width=110)
+        st.markdown("<h1 style='text-align:center;margin:0'>AgentLab</h1>", unsafe_allow_html=True)
+    with right:
+        st.markdown(f"<p style='opacity:0.85;font-size:1.02rem;margin:0'>{DESCRIPTION}</p>", unsafe_allow_html=True)
 # ----------------------------------------------------------------------
 # tab 1: home
 # ----------------------------------------------------------------------
 def render_home():
-    _, mid, _ = st.columns([1, 3, 1])
-    with mid:
-        a, b, c = st.columns([1, 1, 1])
-        with b:
-            st.image(LOGO_URL, width=190)
-        st.markdown("<h1 style='text-align:center;margin:0'>AgentLab</h1>", unsafe_allow_html=True)
-        st.markdown(f"<p style='text-align:center;color:#5A6270;font-size:1.05rem'>{DESCRIPTION}</p>", unsafe_allow_html=True)
-        st.divider()
+    uploaded = st.file_uploader("Upload a dataset (CSV)", type=["csv"])
+    prev = result()
+    if uploaded is None:
+        if prev is not None:
+            st.caption(f"Last run: {prev.get('dataset_name')} ({prev.get('run_id')}). Open the tabs above to see it.")
+        return
 
-        uploaded = st.file_uploader("Upload a dataset (CSV)", type=["csv"])
-        prev = result()
-        if uploaded is None:
-            if prev is not None:
-                st.caption(f"Last run: {prev.get('dataset_name')} ({prev.get('run_id')}). Open the tabs above to see it.")
-            return
+    try:
+        df = pd.read_csv(io.BytesIO(uploaded.getvalue()))
+    except Exception as e:
+        st.error(f"Could not read that file as a CSV: {e}")
+        return
 
+    st.caption(f"{uploaded.name}: {len(df):,} rows and {len(df.columns)} columns")
+    table(df.head(8))
+
+    target = st.selectbox("What do you want to predict?", options=list(df.columns), index=None,
+                          placeholder="Choose the target column")
+    with st.expander("Options"):
+        critic_on = st.toggle("Critic agent active", value=True,
+                              help="Off means the critic only records problems and never changes the pipeline.")
+        max_rev = st.slider("Maximum revisions", 0, 3, 2)
+        n_trials = st.slider("Tuning trials", 5, 50, 20)
+
+    if st.button("Run analysis", type="primary", disabled=target is None):
+        name = Path(uploaded.name).stem
+        run_id = f"{name}_{datetime.now():%Y%m%d_%H%M%S}"
         try:
-            df = pd.read_csv(io.BytesIO(uploaded.getvalue()))
+            st.session_state.result = run_with_progress(df, target, name, run_id, critic_on, max_rev, n_trials)
+            st.session_state.pop("pdf", None)
+            st.success("Done. Open the tabs above to see each agent's work, and the last tab for the full report.")
         except Exception as e:
-            st.error(f"Could not read that file as a CSV: {e}")
-            return
-
-        st.caption(f"{uploaded.name}: {len(df):,} rows and {len(df.columns)} columns")
-        table(df.head(8))
-
-        target = st.selectbox("What do you want to predict?", options=list(df.columns), index=None,
-                              placeholder="Choose the target column")
-        with st.expander("Options"):
-            critic_on = st.toggle("Critic agent active", value=True,
-                                  help="Off means the critic only records problems and never changes the pipeline.")
-            max_rev = st.slider("Maximum revisions", 0, 3, 2)
-            n_trials = st.slider("Tuning trials", 5, 50, 20)
-
-        if st.button("Run analysis", type="primary", disabled=target is None):
-            name = Path(uploaded.name).stem
-            run_id = f"{name}_{datetime.now():%Y%m%d_%H%M%S}"
-            try:
-                st.session_state.result = run_with_progress(df, target, name, run_id, critic_on, max_rev, n_trials)
-                st.session_state.pop("pdf", None)
-                st.success("Done. Open the tabs above to see each agent's work, and the last tab for the full report.")
-            except Exception as e:
-                st.error(str(e))
-                with st.expander("Technical details"):
-                    st.code(traceback.format_exc())
+            st.error(str(e))
+            with st.expander("Technical details"):
+                st.code(traceback.format_exc())
 
 
 # ----------------------------------------------------------------------
@@ -385,6 +396,7 @@ TABS = ["Home", "Validation", "EDA", "Hypotheses", "Features", "Model", "Explain
 RENDERERS = [render_home, render_validation, render_eda, render_hypotheses, render_features,
              render_model, render_explainability, render_critic, render_report]
 
+render_header()
 for tab, render in zip(st.tabs(TABS), RENDERERS):
     with tab:
         render()

@@ -1,26 +1,32 @@
 # AgentLab
 
-A multi-agent system that automates the machine learning workflow: from a raw dataset to a trained model, an explainability report, and a written research report, with a critic agent that checks the results before anything is finalized.
+A multi-agent system that automates the machine learning workflow: from a raw CSV to a trained model, an explainability analysis, and a formal PDF report, with a critic agent that checks the results before anything is finalized.
 
-Unlike a standard AutoML pipeline that runs a fixed sequence of steps, AgentLab splits the workflow across independent agents that each own one job, and adds a critic agent that can send the process back a step if something looks wrong (a leaked feature, an overfit model, a suspicious result). That loop-back mechanism is the project's actual research question: does letting a system critique and revise its own work produce better results than a pipeline that just runs top to bottom.
+Unlike a standard AutoML pipeline that runs a fixed sequence of steps, AgentLab splits the workflow across independent agents that each own one job, and adds a critic agent that can send the process back a step when it finds a fixable problem (a leaked column, an identifier used as a feature). That loop-back mechanism is the project's research question: does letting a system critique and revise its own work produce more trustworthy results than a pipeline that just runs top to bottom?
 
 ## Status
 
-This is a working scaffold, not a finished system. Read this table honestly before assuming something works.
-
-| Agent | Status | Notes |
+| Component | Status | Notes |
 |---|---|---|
-| Validation Agent | Built and tested | Runs standalone, 4 passing unit tests |
-| EDA Agent | Stub | Spec written in docstring, week 3-4 |
-| Feature Engineering Agent | Stub | Week 3-4 |
-| Hypothesis Generation Agent | Stub | Week 8-9 |
-| Model Selection Agent | Stub | Week 5-6 |
-| Tuning Agent | Stub | Week 5-6 |
-| Explainability Agent | Stub | Week 7 |
-| Critic Agent | Stub | Week 8-9 — the actual research contribution, don't rush this |
-| Report Agent | Stub | Week 10 |
-| Graph wiring (`graph/workflow.py`) | Reference code only | Week 11, wire in once every agent above works standalone |
-| Streamlit frontend | Upload page works, rest are placeholders | Week 11 |
+| Validation Agent | Built, 4 unit tests | Duplicates, missing values, constant and identifier-like columns |
+| EDA Agent | Built | Statistics and six plot types |
+| Hypothesis Agent | Built | `run()` proposes hypotheses and flags likely leaks before modeling, `verify()` checks them against SHAP afterwards |
+| Feature Engineering Agent | Built | Per-column imputation, scaling and encoding as a real sklearn pipeline |
+| Model Selection and Tuning Agent | Built | One agent: recommends a model, decides by rules whether tuning is needed, runs Optuna only if it is |
+| Explainability Agent | Built | SHAP, a LIME second opinion, and a check that the model is good enough for explanations to mean anything |
+| Critic Agent | Built | Rule-based checks, loop-back, and an on/off switch for the ablation |
+| Report Agent | Built | Reuses each specialist's own summary, writes only the executive summary and conclusion |
+| Graph wiring (`graph/workflow.py`) | Built | Tested with the real Model Selection, Critic and Report agents plus stand-ins for the other five |
+| Streamlit frontend | Built | One tab per agent, a full report tab, formal PDF download. Tested with Streamlit's AppTest |
+
+**Not yet verified, read this before a demo:**
+
+- The full pipeline with every real agent running together on real datasets.
+- A complete run against a real Ollama install, local and cloud models together.
+- The research ablation itself (critic on versus off across 3 to 4 datasets). The tooling exists, the results do not yet.
+- Storing runs in PostgreSQL. The database is set up, but the pipeline does not write to it yet. MLflow logging is best-effort and is skipped quietly if it fails.
+
+Only the Validation Agent has committed pytest files. The other agents were tested ad hoc during development, which is not the same thing.
 
 ## System architecture
 
@@ -30,120 +36,130 @@ flowchart TD
     V --> E[EDA Agent]
     E --> H[Hypothesis Agent]
     H --> F[Feature Engineering Agent]
-    F --> M[Model Selection Agent]
-    M --> T[Tuning Agent]
-    T --> X[Explainability Agent]
-    X --> C{Critic Agent}
-    C -- flags found: leakage --> F
-    C -- flags found: overfitting --> T
-    C -- approved --> R[Report Agent]
-    R --> Dl[User downloads report]
+    F --> M[Model Selection and Tuning Agent]
+    M --> X[Explainability Agent]
+    X --> VH[Verify hypotheses against SHAP]
+    VH --> C{Critic Agent}
+    C -- leak or identifier column found --> A[Apply revision: drop the columns]
+    A --> F
+    C -- anything else --> R[Report Agent]
+    R --> D[User downloads PDF report]
 ```
 
-The critic's loop-back is the only conditional branch in the graph. Every other edge is a fixed sequence, same as a standard pipeline would run. That contrast is what the project is testing.
+The critic's loop-back is the only conditional branch in the graph. It edits the pipeline only when the evidence is deterministic: a column the Hypothesis Agent proved predicts the target almost perfectly on its own, or an identifier column the model is still using. Everything else (no signal, overfitting, small samples) is reported as a warning, because re-running the same pipeline cannot fix it. Revisions are capped (default 2), so a run always ends.
+
+## Key design decisions
+
+- **Rules decide, the LLM explains.** Every verdict (leak found, tune or not, approve or revise) comes from a measured rule, so it is reproducible and defensible. The LLM only writes the plain-language explanation afterwards, because small local models produced confident wrong explanations of meaningless results during development.
+- **Simplest model within noise.** The Model Selection Agent recommends the simplest model whose cross-validated score is within one standard error of the best, instead of the raw top scorer.
+- **Tuning is a decision, not a default.** It is skipped when the model has no settings, the features carry almost no signal, the score is suspiciously perfect, or the data is too small. A tuned model is adopted only if it improves the held-out test score by at least 1 percent.
+- **The critic re-measures.** It re-scores the model itself instead of trusting numbers reported upstream.
+- **The report never contradicts the specialists.** The Report Agent copies each agent's own verified summary into the report and writes only two short sections itself.
 
 ## Tech stack
 
-```mermaid
-flowchart LR
-    subgraph Agents
-        LG[LangGraph]
-        LC[LangChain]
-    end
-    subgraph LLM
-        OL["Ollama qwen3.5:4b"]
-    end
-    subgraph ML
-        SK[scikit-learn]
-        XG["XGBoost / LightGBM"]
-        OP[Optuna]
-        SH["SHAP / LIME"]
-    end
-    subgraph Storage
-        PG[(PostgreSQL)]
-        MF[MLflow]
-    end
-    subgraph Frontend
-        ST[Streamlit]
-    end
-
-    LG --> LC --> OL
-    LG --> SK
-    LG --> XG
-    LG --> OP
-    LG --> SH
-    LG --> PG
-    LG --> MF
-    ST --> LG
-```
-
 | Layer | Choice | Why |
 |---|---|---|
-| Agent orchestration | LangGraph | Manages shared state between agents and supports conditional loops, which the critic agent needs |
-| LLM | Ollama, `llama3.2:3b` | Runs fully local, zero API cost, zero rate limits, fits a 4GB VRAM GPU comfortably (~2.0GB) |
-| Modeling | scikit-learn, XGBoost, LightGBM | Standard, well-understood baselines, easy to defend in a viva |
-| Tuning | Optuna | Automated hyperparameter search on top of whichever model wins |
-| Explainability | SHAP, LIME | Turns predictions into feature-level reasons, the core differentiator vs plain AutoML |
-| Experiment tracking | MLflow | Free run comparison dashboard without building one from scratch |
-| Database | PostgreSQL | Real client-server database, not a flat file, stores experiment history |
-| Frontend | Streamlit | Fast to build, good enough for a demo-quality interface |
+| Agent orchestration | LangGraph | Shared state between agents and the conditional loop the critic needs |
+| LLM runtime | Ollama | Local model for most agents, cloud models where reasoning quality matters |
+| Modeling | scikit-learn, XGBoost, LightGBM | Standard, well-understood, easy to defend |
+| Tuning | Optuna | Search is focused on the settings the diagnostics point to |
+| Explainability | SHAP, LIME | Feature-level reasons for predictions |
+| Experiment tracking | MLflow | Run comparison without building a dashboard |
+| Database | PostgreSQL | Set up for experiment history, not yet written to by the pipeline |
+| Frontend | Streamlit | Tabs, live progress, file upload |
+| PDF report | ReportLab | Full control over a formal, numbered layout |
+
+### Model routing
+
+| Agent | Model | Setting in `.env` |
+|---|---|---|
+| Validation, EDA, Feature Engineering, Model Selection, Explainability | `llama3.2:3b` (local) | `LOCAL_MODEL` |
+| Hypothesis | `gpt-oss:20b-cloud` | `HYPOTHESIS_MODEL` |
+| Critic | `gpt-oss:120b-cloud` | `CRITIC_MODEL` |
+| Report | `nemotron-3-nano:30b-cloud` | `REPORT_MODEL` |
+
+The cloud models need `ollama signin`, an internet connection, and count against your Ollama cloud usage limits. The gpt-oss models ignore `think=False` and need a reasoning level instead, which the agents already handle.
 
 ## Folder structure
 
 ```
 agentlab/
-├── agents/            one file per agent, each independently testable
-│   ├── base_agent.py       shared contract every agent follows
-│   └── validation_agent.py the only fully built agent right now
-├── graph/             LangGraph state definition + the wiring that connects agents
-├── database/          PostgreSQL models and connection handling
-├── memory/            experiment memory (past runs), used by the Model Selection Agent
-├── ml/                shared ML code: preprocessing, training, explainability, MLflow logging
-├── prompts/           prompt templates, kept separate from agent logic
-├── frontend/          Streamlit app and pages
-├── data/              uploaded and processed datasets (gitignored)
-├── reports/           generated reports land here (gitignored)
-├── tests/             unit tests, one file per agent
-└── docs/              architecture notes, filled in as the project progresses
+├── agents/
+│   ├── base_agent.py                shared contract every agent follows
+│   ├── validation_agent.py
+│   ├── eda_agent.py
+│   ├── hypothesis_agent.py          run() before modeling, verify() after SHAP
+│   ├── feature_engineering_agent.py
+│   ├── model_selection_agent.py     model selection and tuning in one agent
+│   ├── explainability_agent.py
+│   ├── critic_agent.py              checks, decision, apply_revision()
+│   └── report_agent.py
+├── graph/
+│   ├── state.py                     every key that flows between agents
+│   └── workflow.py                  the LangGraph pipeline
+├── prompts/                         one prompt file per agent
+├── frontend/
+│   ├── app.py                       Streamlit app
+│   └── pdf_report.py                formal PDF generator
+├── config/settings.py               reads .env, every variable must be declared here
+├── database/  memory/  ml/          week-1 scaffold, only ml/mlflow_tracking.py is used
+├── data/  reports/                  uploads and generated output (gitignored)
+├── tests/                           validation agent tests only so far
+└── docs/                            architecture notes and experiment results
 ```
+
+If `frontend/pages/` still exists from the first scaffold, delete it. Streamlit turns every file in that folder into a sidebar page.
 
 ## Setup
 
 ### 1. Python environment
 
-Use Python 3.11. Newer versions work with some libraries but 3.11 is the version every dependency here (SHAP in particular) supports cleanly with no edge cases.
+Use Python 3.11.
 
 ```bash
 python3.11 -m venv venv
-source venv/bin/activate
+source venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Ollama (local LLM)
+`requirements.txt` needs at least: `pandas`, `numpy`, `scipy`, `scikit-learn`, `xgboost`, `lightgbm`, `optuna`, `shap`, `lime`, `matplotlib`, `seaborn`, `langgraph`, `ollama`, `streamlit`, `reportlab`, `mlflow`, `python-dotenv`, `sqlalchemy`, `psycopg2-binary`.
+
+### 2. Ollama
 
 ```bash
 # install Ollama: https://ollama.com/download
 ollama pull llama3.2:3b
-ollama serve   # leave this running in a separate terminal
+ollama signin            # needed once, for the cloud models
+ollama serve             # leave running in a separate terminal
 ```
 
-Every agent's LLM calls go through this local model. If `ollama serve` isn't running, agents fall back to a plain templated summary instead of crashing, but you'll want the real model running for anything beyond a structural test.
+If Ollama is not reachable, every agent falls back to a plain templated summary instead of crashing. The numbers and decisions are unaffected, only the prose.
 
 ### 3. PostgreSQL
 
 ```bash
-# create a local database matching .env
 createdb agentlab
-# or, with Docker:
+# or with Docker:
 docker run --name agentlab-pg -e POSTGRES_USER=agentlab -e POSTGRES_PASSWORD=agentlab -e POSTGRES_DB=agentlab -p 5432:5432 -d postgres
 ```
 
 ### 4. Environment file
 
-```bash
-cp .env.example .env
-# defaults already match the Ollama + Postgres setup above, edit only if yours differs
+Create `.env` in the project root:
+
 ```
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+LOCAL_MODEL=llama3.2:3b
+HYPOTHESIS_MODEL=gpt-oss:20b-cloud
+CRITIC_MODEL=gpt-oss:120b-cloud
+REPORT_MODEL=nemotron-3-nano:30b-cloud
+DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/agentlab
+MLFLOW_TRACKING_URI=./mlruns
+```
+
+A value in `.env` only reaches the code if `config/settings.py` declares a matching attribute. If an agent fails with `'Settings' object has no attribute ...`, that is why.
 
 ### 5. Initialize the database tables
 
@@ -153,36 +169,57 @@ python -c "from database.db import init_db; init_db()"
 
 ## Running things
 
-**Validation agent standalone:**
+**The whole pipeline from the command line:**
+
 ```bash
-python -m agents.validation_agent path/to/your/dataset.csv
+python -m graph.workflow path/to/data.csv target_column
+python -m graph.workflow path/to/data.csv target_column --no-critic     # critic only records, never changes anything
+python -m graph.workflow path/to/data.csv target_column --ablation      # same data, critic on versus off
+python -m graph.workflow --diagram                                      # Mermaid source of the graph
 ```
 
-**Unit tests:**
-```bash
-pytest tests/ -v
-```
+**The web app** (run from the project root):
 
-**Streamlit frontend** (once more agents are built):
 ```bash
 streamlit run frontend/app.py
 ```
 
-## Build order
+**One agent at a time:**
 
-Follow this order, don't jump ahead, each phase assumes the previous one actually works.
+```bash
+python -m agents.validation_agent path/to/data.csv
+python -m agents.eda_agent path/to/data.csv
+python -m agents.feature_engineering_agent path/to/data.csv
+python -m agents.model_selection_agent path/to/data.csv target_column
+python -m agents.explainability_agent path/to/data.csv target_column [model_name]
+python -m agents.hypothesis_agent path/to/data.csv target_column [model_name]
+```
 
-1. Validation Agent — done
-2. EDA Agent + Feature Engineering Agent
-3. Model Selection + Tuning Agent (Optuna)
-4. Explainability Agent (SHAP + LIME)
-5. Hypothesis Generation Agent
-6. Critic Agent — the actual research contribution, budget real time here
-7. Report Agent
-8. Wire everything into `graph/workflow.py`
-9. Streamlit frontend
-10. Testing, documentation, buffer
+The Critic and Report agents have no standalone command because they need the output of every agent before them. Run them through `graph.workflow`.
 
-## The research question this project is actually testing
+**Unit tests:**
 
-Run every test dataset through the pipeline twice: once with the Critic Agent active, once with it stubbed to always approve. Compare final model quality and explainability soundness between the two runs. That comparison, across at least 3-4 different datasets, is the real evidence behind this project's claim, not a mathematical proof. Document results in `docs/architecture.md` as they come in.
+```bash
+pytest tests/ -v
+```
+
+## The research question
+
+Run every test dataset through the pipeline twice, once with the Critic Agent active and once with it switched to audit-only, using `--ablation` or `graph.workflow.run_ablation()`. In audit-only mode the critic runs every check and records its flags but always approves, so the flags show exactly what the no-critic pipeline shipped without noticing.
+
+**Read the flags next to the scores.** A higher score with the critic off is not a win if the critic's flags show the score came from a leaked column. The datasets used for this comparison must have real, imperfect signal: a dataset whose columns are all either rules applied to other columns or random noise (as one early test dataset was) cannot tell you anything about model quality. Compare across at least 3 to 4 datasets and record results in `docs/architecture.md`.
+
+## Known limitations
+
+- The Hypothesis Agent screens one feature at a time, so features that only matter in combination look like noise to it. The verification step reports when SHAP disagrees, but the screen cannot see interactions up front.
+- Exact SHAP can be very slow on large random forests. The Explainability Agent works inside a time budget and explains fewer rows when it has to, and says so in its reliability note.
+- Numeric ID columns can slip through Validation, because its identifier check only scans text columns.
+- The critic only fixes leaks and identifier columns automatically. Overfitting and weak signal are reported as warnings, not corrected.
+
+## What is left
+
+1. Run the full pipeline with every real agent on real datasets and fix whatever the first complete run exposes.
+2. Choose 3 to 4 datasets with real signal and run the critic on/off ablation on each.
+3. Write the results into `docs/architecture.md`.
+4. Commit tests for the agents beyond Validation.
+5. Write runs to PostgreSQL if run history is part of the final demo.
