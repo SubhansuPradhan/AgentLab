@@ -38,9 +38,6 @@ flowchart TD
     C -- flags found: overfitting --> T
     C -- approved --> R[Report Agent]
     R --> Dl[User downloads report]
-
-    style C fill:#f9d5d5,stroke:#c0392b
-    style V fill:#d5f0f9,stroke:#2980b9
 ```
 
 The critic's loop-back is the only conditional branch in the graph. Every other edge is a fixed sequence, same as a standard pipeline would run. That contrast is what the project is testing.
@@ -83,7 +80,7 @@ flowchart LR
 | Layer | Choice | Why |
 |---|---|---|
 | Agent orchestration | LangGraph | Manages shared state between agents and supports conditional loops, which the critic agent needs |
-| LLM | Ollama, `qwen3.5:4b` | Runs fully local, zero API cost, zero rate limits, fits a 4GB VRAM GPU comfortably (~3.4GB) |
+| LLM | Ollama, `llama3.2:3b` | Runs fully local, zero API cost, zero rate limits, fits a 4GB VRAM GPU comfortably (~2.0GB) |
 | Modeling | scikit-learn, XGBoost, LightGBM | Standard, well-understood baselines, easy to defend in a viva |
 | Tuning | Optuna | Automated hyperparameter search on top of whichever model wins |
 | Explainability | SHAP, LIME | Turns predictions into feature-level reasons, the core differentiator vs plain AutoML |
@@ -126,7 +123,7 @@ pip install -r requirements.txt
 
 ```bash
 # install Ollama: https://ollama.com/download
-ollama pull qwen3.5:4b
+ollama pull llama3.2:3b
 ollama serve   # leave this running in a separate terminal
 ```
 
